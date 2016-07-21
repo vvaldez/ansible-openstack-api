@@ -11,8 +11,13 @@ This playbook uses Ansible URI module to communicate with OpenStack APIs using J
 
 This playbook grabs an authentication token from the OpenStack Identity service and reuses that through several tasks as admin. It creates a project and user based on defined variables then revokes the token and authenticates as the new user to complete the remainder of the tasks. For a project I was working on we were stuck using Ansible 1.9.x so could not take advantage of some of the new 2.x modules. However, this playbook runs considerably faster than using shell/command modules or a bash script with equivalent CLI command.
 
+## Advantages
 Some of the advantages of this approach over OpenStack CLI commands or even what modules do work is that authentication does not need to be provided on every single CLI invocation. Reusing then revoking the token is much faster so as the number of tasks invoked increases so does the efficiency of this approach. The API also returns native JSON which makes accessing object data a snap, rather than using a shell or command module and painstakingly trying to awk/grep or otherwise get at the data you need.
 
+## Disadvantages
+The main issue is how sensitive the formatting of JSON payload needs to be in the URI module for the OpenStack APIs to be happy. I tried using native yaml to pass to the OpenStack API but couldn't get it to cooperate.
+
+## Future
 I plan on enhancing this with additional actions and possibly converting it into a role but want to evaluate options and effects of Ansible 2.x.
 
 ## Related
