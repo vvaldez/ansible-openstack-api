@@ -1,0 +1,749 @@
+---
+- hosts: localhost
+  gather_facts: false
+  vars:
+    os_controller: "192.168.1.131"
+    os_admin_auth_url: "http://{{ os_controller }}:5000/v3"
+    os_admin_project: "admin"
+    os_admin_username: "admin"
+    os_admin_password: "password"
+    os_auth_url: "http://{{ os_controller }}:35357/v3"
+    os_networking_url: "http://{{ os_controller }}:9696/v2.0"
+    os_username: "ansibletest-user1"
+    os_password: "password"
+    os_project: "ansibletest-project1"
+    os_security_group: "default"
+    os_network_name: "{{ os_project }}"
+    os_subnet_name: "{{ os_project }}"
+    os_subnet_cidr: "192.168.0.0/24"
+    os_router_name: "{{ os_project }}"
+    # Due to the sensitive json formatting required by the OpenStack API, standard Ansible list cannot be used for dns_nameservers
+    os_dns_nameserver1: "192.168.1.31"
+    os_dns_nameserver2: "192.168.1.32"
+  tasks:
+    - name: "Obtain admin token from Identity service"
+      uri:
+        url: "{{ os_admin_auth_url }}/auth/tokens"
+        method: POST
+        body_format: json
+        body: '
+          { "auth": {
+              "identity": {
+                "methods": ["password"],
+                "password": {
+                  "user": {
+                    "domain": {
+                      "id": "default"
+                    },
+                    "name": "{{ os_admin_username }}",
+                    "password": "{{ os_admin_password }}"
+                  }
+                }
+              },
+              "scope": {
+                "project": {
+                  "domain": {
+                    "id": "default"
+                  },
+                  "name": "{{ os_admin_project }}"
+                }
+              }
+            }
+          }'
+        status_code: 201
+        HEADER_Content-Type: "application/json"
+      register: keystone_admin_response
+
+    - debug:
+        var: keystone_admin_response
+      when: debug is defined
+
+    - name: "Set OpenStack token fact"
+      set_fact:
+        os_admin_token: "{{ keystone_admin_response.x_subject_token }}"
+
+    - name: "Validate OpenStack token is not blank"
+      fail: "OpenStack token not obtained properly"
+      when: os_admin_token is undefined or os_admin_token is none or os_admin_token|trim == ''
+
+    - debug:
+        var: os_admin_token
+      when: debug is defined
+
+    - name: "Verify token against OpenStack Identity service"
+      uri:
+        url: "{{ os_admin_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        HEADER_X-Subject-Token: "{{ os_admin_token }}"
+
+    - name: "Set admin user ID fact"
+      set_fact:
+        os_admin_user_id: "{{ keystone_admin_response.json.token.user.id }}"
+
+    - name: "Set admin project ID fact"
+      set_fact:
+        os_admin_project_id: "{{ keystone_admin_response.json.token.project.id }}"
+
+    # Project
+    - name: "Determine if project exists"
+      uri:
+        url: "{{ os_admin_auth_url }}/projects?name={{ os_project }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: get_project
+
+    - debug:
+        var: get_project
+      when: debug is defined
+
+    - name: "Set project ID fact if project exists"
+      set_fact:
+        os_project_id: "{{ get_project.json.projects.0.id }}"
+      when: get_project.json.projects.0.name is defined
+
+    - name: "Create project if not found"
+      uri:
+        url: "{{ os_admin_auth_url }}/projects"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        body_format: json
+        body: '
+          { "project": {
+              "name": "{{ os_project }}",
+              "enabled": true
+            }
+          }'
+      register: project_create
+      when: os_project_id is undefined
+
+    - debug:
+        var: project_create
+      when: debug is defined
+
+    - name: "Set project ID fact if it was created"
+      set_fact:
+        os_project_id: "{{ project_create.json.project.id }}"
+      when: os_project_id is undefined
+
+    # Project User
+    - name: "Determine if user exists"
+      uri:
+        url: "{{ os_admin_auth_url }}/users?name={{ os_username }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: get_user
+
+    - debug:
+        var: get_user
+      when: debug is defined
+
+    - name: "Set user ID fact if user exists"
+      set_fact:
+        os_user_id: "{{ get_user.json.users.0.id }}"
+      when: get_user.json.users.0.name is defined
+
+    - name: "Create user if not found"
+      uri:
+        url: "{{ os_admin_auth_url }}/users"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        body_format: json
+        body: '
+          { "user": {
+              "name": "{{ os_username }}",
+              "password": "{{ os_password }}",
+              "enabled": true
+            }
+          }'
+      register: user_create
+      when: os_user_id is undefined
+
+    - name: "Set user ID fact if it was created"
+      set_fact:
+        os_user_id: "{{ user_create.json.user.id }}"
+      when: os_user_id is undefined
+
+    - debug:
+        var: user_create
+      when: debug is defined
+
+    # Project role
+    - name: "List _member_ role"
+      uri:
+        url: "{{ os_admin_auth_url }}/roles?name=_member_"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: member_role
+
+    - debug:
+        var: member_role
+      when: debug is defined
+
+    - name: "Set _member_ role ID fact"
+      set_fact:
+        os_role_id: "{{ member_role.json.roles.0.id }}"
+
+    - name: "List admin role"
+      uri:
+        url: "{{ os_admin_auth_url }}/roles?name=admin"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: admin_role
+
+    - debug:
+        var: admin_role
+      when: debug is defined
+
+    - name: "Set admin role ID fact"
+      set_fact:
+        os_admin_role_id: "{{ admin_role.json.roles.0.id }}"
+
+    - name: "Assign _member_ role to user"
+      uri:
+        url: "{{ os_admin_auth_url }}/projects/{{ os_project_id }}/users/{{ os_user_id }}/roles/{{ os_role_id }}"
+        method: PUT
+        status_code: 204
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: role_assign_member
+      when: get_user.json.users.0.name is undefined
+
+    - debug:
+        var: role_assign_member
+      when: debug is defined
+
+    - name: "Assign admin to project"
+      uri:
+        url: "{{ os_admin_auth_url }}/projects/{{ os_project_id }}/users/{{ os_admin_user_id }}/roles/{{ os_admin_role_id }}"
+        method: PUT
+        status_code: 204
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+      register: role_assign_admin
+
+    - debug:
+        var: role_assign_admin
+      when: debug is defined
+
+    # Clean up admin token
+    - name: "Verify token against OpenStack Identity service"
+      uri:
+        url: "{{ os_admin_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        HEADER_X-Subject-Token: "{{ os_admin_token }}"
+      when: debug is defined
+
+    - name: "Revoke OpenStack token"
+      uri:
+        url: "{{ os_admin_auth_url }}/auth/tokens"
+        method: DELETE
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        HEADER_X-Subject-Token: "{{ os_admin_token }}"
+        status_code: 200,204
+      register: os_admin_token_delete
+      ignore_errors: yes
+
+    - debug:
+        var: os_admin_token_delete
+      when: debug is defined
+
+    - name: "Verify token was revoked"
+      uri:
+        url: "{{ os_admin_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204,400,401,403,404,405,409,413,415,503
+        HEADER_X-Auth-Token: "{{ os_admin_token }}"
+        HEADER_X-Subject-Token: "{{ os_admin_token }}"
+      ignore_errors: yes
+      register: os_admin_token_check
+
+    - debug:
+        var: os_admin_token_check
+      when: debug is defined
+
+    - name: "Token revocation successful"
+      debug:
+        msg: "OpenStack token successfully revoked and tested with a status code of {{ os_admin_token_check.status }}"
+      when:
+        - os_admin_token_check.status == 401
+        - debug is defined
+
+    # Perform user actions
+    - name: "Obtain user token from Identity service"
+      uri:
+        url: "{{ os_auth_url }}/auth/tokens"
+        method: POST
+        body_format: json
+        body: '
+          { "auth": {
+              "identity": {
+                "methods": ["password"],
+                "password": {
+                  "user": {
+                    "domain": {
+                      "id": "default"
+                    },
+                    "name": "{{ os_username }}",
+                    "password": "{{ os_password }}"
+                  }
+                }
+              },
+              "scope": {
+                "project": {
+                  "domain": {
+                    "id": "default"
+                  },
+                  "id": "{{ os_project_id }}"
+                }
+              }
+            }
+          }'
+        status_code: 201
+        HEADER_Content-Type: "application/json"
+      ignore_errors: yes
+      register: keystone_response
+
+    - debug:
+        var: keystone_response
+      when: debug is defined
+
+    - name: "Set OpenStack token fact"
+      set_fact:
+        os_token: "{{ keystone_response.x_subject_token }}"
+
+    - name: "Validate OpenStack token is not blank"
+      fail: "OpenStack token not obtained properly"
+      when: os_token is undefined or os_token is none or os_token|trim == ''
+
+    - debug:
+        var: os_token
+      when: debug is defined
+
+    - name: "Verify token against OpenStack Identity service"
+      uri:
+        url: "{{ os_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        HEADER_X-Subject-Token: "{{ os_token }}"
+
+    # Security Group
+    - name: "Determine if security group exists"
+      uri:
+        url: "{{ os_networking_url }}/security-groups?name={{ os_security_group }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_security_group
+
+    - debug:
+        var: get_security_group
+      when: debug is defined
+
+    - name: "Set security_group facts if it exists"
+      set_fact:
+        os_security_group_id: "{{ get_security_group.json.security_groups.0.id }}"
+        os_security_group_rules: "{{ get_security_group.json.security_groups.0.security_group_rules }}"
+      when: get_security_group.json.security_groups.0.name is defined
+
+    - name: "Create security_group if not found"
+      uri:
+        url: "{{ os_networking_url }}/security-groups"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "security_group": {
+              "name": "{{ os_security_group }}"
+            }
+          }'
+      register: security_group_create
+      when: os_security_group_id is undefined
+
+    - debug:
+        var: security_group_create
+      when: debug is defined
+
+    - name: "Set security_group facts if it was created"
+      set_fact:
+        os_security_group_id: "{{ security_group_create.json.security_group.id }}"
+        os_security_group_rules: "{{ security_group_create.json.security_group.security_group_rules }}"
+      when: os_security_group_id is undefined
+
+    - debug:
+        var: os_security_group_id
+      when: debug is defined
+
+    - debug:
+        var: os_security_group_rules
+      when: debug is defined
+
+    # Security Group Rules
+    - name: "Determine if security group SSH rule exists"
+      set_fact:
+        ssh_rule_exists: true
+      when:
+        - item.direction == "ingress"
+        - item.port_range_max == 22
+        - item.port_range_min == 22
+        - item.protocol == "tcp"
+      with_items: os_security_group_rules
+
+    - debug:
+        var: ssh_rule_exists
+      when: debug is defined
+
+    - name: "Determine if security group ICMP rule exists"
+      set_fact:
+        icmp_rule_exists: true
+      when:
+        - item.direction == "ingress"
+        - item.protocol == "icmp"
+      with_items: os_security_group_rules
+
+    - debug:
+        var: icmp_rule_exists
+      when: debug is defined
+
+    - name: "Create security group rule for SSH if not found"
+      uri:
+        url: "{{ os_networking_url }}/security-group-rules"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "security_group_rule": {
+              "direction": "ingress",
+              "port_range_min": "22",
+              "port_range_max": "22",
+              "protocol": "tcp",
+              "security_group_id": "{{ os_security_group_id }}"
+
+            }
+          }'
+      register: security_group_rule_ssh_create
+      when: ssh_rule_exists is undefined
+
+    - debug:
+        var: security_group_rule_ssh_create
+      when: debug is defined
+
+    - name: "Create security group rule for ICMP if not found"
+      uri:
+        url: "{{ os_networking_url }}/security-group-rules"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "security_group_rule": {
+              "direction": "ingress",
+              "protocol": "icmp",
+              "security_group_id": "{{ os_security_group_id }}"
+
+            }
+          }'
+      register: security_group_rule_icmp_create
+      when: icmp_rule_exists is undefined
+
+    - debug:
+        var: security_group_rule_icmp_create
+      when: debug is defined
+
+    # External networking
+    # Note - current assumption is that the first network with an external router will be used. The os_external_network_id and os_external_subnet_id can be specified as variables to avoid this step and be explicit
+    - name: "Discover first external network"
+      uri:
+        url: "{{ os_networking_url }}/networks?router:external=true"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_external_networks
+      when: os_external_network_id is undefined or os_external_network_id is none or os_external_network_id|trim == ''
+
+    - debug:
+        var: get_external_networks
+      when: debug is defined
+#
+    - name: "Determine external network ID and subnet Id"
+      # Again, assuming the first subnet attached to the first external network. Will enhance as needed but this covers most standard deployments. These IDs can also be explicitly specified to avoid any ambiguity.
+      set_fact:
+        os_external_network_id: "{{ get_external_networks.json.networks.0.id }}"
+        os_external_subnet_id: "{{ get_external_networks.json.networks.0.subnets.0 }}"
+      when: (os_external_network_id is undefined or os_external_network_id is none or os_external_network_id|trim == '') or (os_external_subnet_id is undefined or os_external_subnet_id is none or os_external_subnet_id|trim == '')
+
+    - debug:
+        var: os_external_network_id
+      when: debug is defined
+
+    - debug:
+        var: os_external_subnet_id
+      when: debug is defined
+
+    # Project networking
+    - name: "Determine if network exists"
+      uri:
+        url: "{{ os_networking_url }}/networks?name={{ os_network_name }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_networks
+
+    - debug:
+        var: get_networks
+      when: debug is defined
+
+    - name: "Set network ID fact if it exists"
+      set_fact:
+        os_network_id: "{{ get_networks.json.networks.0.id }}"
+      when: get_networks.json.networks.0.name is defined
+
+    - debug:
+        var: os_network_id
+      when: debug is defined
+
+    - name: "Create network if not found"
+      uri:
+        url: "{{ os_networking_url }}/networks"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "network": {
+              "name": "{{ os_network_name }}"
+            }
+          }'
+      register: network_create
+      when: os_network_id is undefined
+
+    - debug:
+        var: network_create
+      when: debug is defined
+
+    - name: "Set network fact if it was created"
+      set_fact:
+        os_network_id: "{{ network_create.json.network.id }}"
+      when: os_network_id is undefined
+
+    - debug:
+        var: os_network_id
+      when: debug is defined
+
+    # Project subnet
+    - name: "Determine if subnet exists"
+      uri:
+        url: "{{ os_networking_url }}/subnets?name={{ os_subnet_name }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_subnets
+
+    - debug:
+        var: get_subnets
+      when: debug is defined
+
+    - name: "Set subnet ID fact if it exists"
+      set_fact:
+        os_subnet_id: "{{ get_subnets.json.subnets.0.id }}"
+      when: get_subnets.json.subnets.0.name is defined
+
+    - debug:
+        var: os_subnet_id
+      when: debug is defined
+
+    - name: "Create subnet if not found"
+      uri:
+        url: "{{ os_networking_url }}/subnets"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "subnet": {
+              "name": "{{ os_subnet_name }}",
+              "network_id": "{{ os_network_id }}",
+              "ip_version": 4,
+              "cidr": "{{ os_subnet_cidr }}",
+              "dns_nameservers": [
+                "{{ os_dns_nameserver1 }}",
+                "{{ os_dns_nameserver2 }}"
+              ]
+            }
+          }'
+      register: subnet_create
+      when: os_subnet_id is undefined
+
+    - debug:
+        var: subnet_create
+      when: debug is defined
+
+    - name: "Set subnet fact if it was created"
+      set_fact:
+        os_subnet_id: "{{ subnet_create.json.subnet.id }}"
+      when: os_subnet_id is undefined
+
+    - debug:
+        var: os_subnet_id
+      when: debug is defined
+
+    # Project router
+    - name: "Determine if router exists"
+      uri:
+        url: "{{ os_networking_url }}/routers?name={{ os_router_name }}"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_routers
+
+    - debug:
+        var: get_routers
+      when: debug is defined
+
+    - name: "Set router ID fact if it exists"
+      set_fact:
+        os_router_id: "{{ get_routers.json.routers.0.id }}"
+      when: get_routers.json.routers.0.name is defined
+
+    - debug:
+        var: os_router_id
+      when: debug is defined
+
+    - name: "Create router if not found"
+      uri:
+        url: "{{ os_networking_url }}/routers"
+        method: POST
+        status_code: 201
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "router": {
+              "name": "{{ os_router_name }}",
+              "external_gateway_info": {
+                "network_id": "{{ os_external_network_id }}"
+              }
+            }
+          }'
+      register: router_create
+      when: os_router_id is undefined
+
+    - debug:
+        var: router_create
+      when: debug is defined
+
+    - name: "Set router fact if it was created"
+      set_fact:
+        os_router_id: "{{ router_create.json.router.id }}"
+      when: os_router_id is undefined
+
+    - debug:
+        var: os_router_id
+      when: debug is defined
+
+    # Project router_interface
+    - name: "Determine router interface port ID"
+      uri:
+        url: "{{ os_networking_url }}/ports?device_owner=network:router_interface"
+        method: GET
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+      register: get_router_interface_port
+
+    - debug:
+        var: get_router_interface_port
+      when: debug is defined
+
+    - name: "Set port ID of router interface"
+      set_fact:
+        os_router_interface_port_id: "{{ get_router_interface_port.json.ports.0.id }}"
+        os_router_interface_port_status: "{{ get_router_interface_port.json.ports.0.status }}"
+      when: get_router_interface_port.json.ports.0.id is defined
+
+    - debug:
+        var: os_router_interface_port_id
+      when: debug is defined
+
+    - debug:
+        var: os_router_interface_port_status
+      when: debug is defined
+
+    - name: "Create router interface if not found"
+      uri:
+        url: "{{ os_networking_url }}/routers/{{ os_router_id }}/add_router_interface"
+        method: PUT
+        status_code: 200
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        body_format: json
+        body: '
+          { "subnet_id": "{{ os_subnet_id }}"
+          }'
+      register: router_interface_create
+      when: os_router_interface_port_id is undefined
+
+    - debug:
+        var: router_interface_create
+      when: debug is defined
+
+    - name: "Set router_interface fact if it was created"
+      set_fact:
+        os_router_interface_port_id: "{{ router_interface_create.json.port_id }}"
+      when: os_router_interface_port_id is undefined
+
+    - debug:
+        var: os_router_interface_port_id
+      when: debug is defined
+
+    # Clean up user token
+    - name: "Verify token against OpenStack Identity service"
+      uri:
+        url: "{{ os_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        HEADER_X-Subject-Token: "{{ os_token }}"
+      when: debug is defined
+
+    - name: "Revoke OpenStack token"
+      uri:
+        url: "{{ os_auth_url }}/auth/tokens"
+        method: DELETE
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        HEADER_X-Subject-Token: "{{ os_token }}"
+        status_code: 200,204
+      register: os_token_delete
+      ignore_errors: yes
+
+    - debug:
+        var: os_token_delete
+      when: debug is defined
+
+    - name: "Verify token was revoked"
+      uri:
+        url: "{{ os_auth_url }}/auth/tokens"
+        method: HEAD
+        status_code: 200,204,400,401,403,404,405,409,413,415,503
+        HEADER_X-Auth-Token: "{{ os_token }}"
+        HEADER_X-Subject-Token: "{{ os_token }}"
+      ignore_errors: yes
+      register: os_token_check
+
+    - debug:
+        var: os_token_check
+      when: debug is defined
+
+    - name: "Token revocation successful"
+      debug:
+        msg: "OpenStack token successfully revoked and tested with a status code of {{ os_token_check.status }}"
+      when:
+        - os_token_check.status == 401
+        - debug is defined
